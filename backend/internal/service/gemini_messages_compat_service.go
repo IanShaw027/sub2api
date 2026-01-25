@@ -969,6 +969,15 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
 	}
 
+	// 检测是否为图像生成请求
+	isImageGen := isImageGenerationModel(originalModel)
+	var imageSize string
+	if isImageGen {
+		// 提取图像尺寸（用于计费）
+		imageSize = s.extractImageSize(body)
+		log.Printf("[GeminiNative] Image generation request detected, model=%s, imageSize=%s", originalModel, imageSize)
+	}
+
 	mappedModel := originalModel
 	if account.Type == AccountTypeAPIKey {
 		mappedModel = account.GetMappedModel(originalModel)
@@ -1371,6 +1380,14 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		usage = &ClaudeUsage{}
 	}
 
+	// 图像生成计费逻辑
+	imageCount := 0
+	if isImageGen {
+		// Gemini 图片生成 API 每次请求只生成一张图片（API 限制）
+		imageCount = 1
+		log.Printf("[GeminiNative] Image generation completed, imageSize=%s, imageCount=%d", imageSize, imageCount)
+	}
+
 	return &ForwardResult{
 		RequestID:    requestID,
 		Usage:        *usage,
@@ -1378,6 +1395,8 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		Stream:       stream,
 		Duration:     time.Since(startTime),
 		FirstTokenMs: firstTokenMs,
+		ImageCount:   imageCount,
+		ImageSize:    imageSize,
 	}, nil
 }
 
@@ -3030,4 +3049,28 @@ func convertClaudeGenerationConfig(req map[string]any) map[string]any {
 		return nil
 	}
 	return out
+}
+
+// extractImageSize 从 Gemini 请求中提取 image_size 参数（用于图像生成计费）
+func (s *GeminiMessagesCompatService) extractImageSize(body []byte) string {
+	var req struct {
+		GenerationConfig *struct {
+			ImageConfig *struct {
+				ImageSize string `json:"imageSize"`
+			} `json:"imageConfig"`
+		} `json:"generationConfig"`
+	}
+
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "2K" // 默认 2K
+	}
+
+	if req.GenerationConfig != nil && req.GenerationConfig.ImageConfig != nil {
+		size := strings.ToUpper(strings.TrimSpace(req.GenerationConfig.ImageConfig.ImageSize))
+		if size == "1K" || size == "2K" || size == "4K" {
+			return size
+		}
+	}
+
+	return "2K" // 默认 2K
 }
